@@ -1,0 +1,62 @@
+# ======================
+# ESP-IDF build outputs
+# ======================
+/build/
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
+/.cache/
+*.elf
+*.bin
+*.map
+*.hex
+*.uf2
+
+# ======================
+# SDK config
+# ======================
+# Keep the default config templates tracked; ignore only local/generated config.
+sdkconfig
+sdkconfig.old
+
+# ======================
+# Managed components (fetched automatically)
+# ======================
+managed_components/
+
+# ======================
+# Python & virtualenv
+# ======================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# ======================
+# Editor / IDE
+# ======================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+
+# ======================
+# Logs and temporary files
+# ======================
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# ======================
+# OS generated files
+# ======================
+._*

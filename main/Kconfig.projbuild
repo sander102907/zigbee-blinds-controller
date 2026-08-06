@@ -1,0 +1,5 @@
+menu "Zigbee Blinds Controller Configuration"
+    config BATTERY_MEASUREMENT_GPIO
+        int "GPIO of the battery measurement"
+        default 2
+endmenu
