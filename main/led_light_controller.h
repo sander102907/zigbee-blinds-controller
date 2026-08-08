@@ -15,7 +15,7 @@
 
 #define ESP_ZIGBEE_STORAGE_PARTITION_NAME "zb_storage"
 
-#define ESP_BATTERY_ATTR_UPDATE_INTERVAL (5) /* Battery attributes update interval (seconds) */
+#define ESP_BATTERY_ATTR_UPDATE_INTERVAL CONFIG_BATTERY_UPDATE_INTERVAL /* Battery attributes update interval (seconds) */
 
 #define ESP_MANUFACTURER_NAME "\x09""ESPRESSIF"
 #define ESP_MODEL_IDENTIFIER "\x07"CONFIG_IDF_TARGET

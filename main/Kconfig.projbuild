@@ -2,4 +2,16 @@ menu "Zigbee Blinds Controller Configuration"
     config BATTERY_MEASUREMENT_GPIO
         int "GPIO of the battery measurement"
         default 2
+
+    config BATTERY_UPDATE_INTERVAL
+        int "Battery update interval in seconds"
+        default 5
+
+    config MOTOR_FORWARD_GPIO
+        int "GPIO of the motor forward"
+        default 4
+
+    config MOTOR_BACKWARD_GPIO
+        int "GPIO of the motor backward"
+        default 5
 endmenu

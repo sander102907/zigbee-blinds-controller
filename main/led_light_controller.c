@@ -16,7 +16,6 @@
 #include "freertos/task.h"
 #include "motor_driver.c"
 
-
 #ifdef CONFIG_PM_ENABLE
 #include "esp_pm.h"
 #include "esp_sleep.h"
@@ -48,13 +47,15 @@ static const char *TAG = "LED_LIGHT_CONTROLLER";
 static led_strip_handle_t s_led_strip;
 static uint8_t s_tilt_percentage = 0;
 
-typedef enum {
+typedef enum
+{
     MOTOR_DIRECTION_STOP = 0,
     MOTOR_DIRECTION_FORWARD,
     MOTOR_DIRECTION_BACKWARD,
 } motor_direction_t;
 
-typedef enum {
+typedef enum
+{
     MOTOR_CONTROL_SOURCE_NONE = 0,
     MOTOR_CONTROL_SOURCE_BUTTONS,
     MOTOR_CONTROL_SOURCE_ZIGBEE,
@@ -208,7 +209,8 @@ static void zcl_color_attr_value_handler(const ezb_zcl_attribute_t *attribute)
  */
 static void apply_motor_direction(motor_direction_t direction)
 {
-    switch (direction) {
+    switch (direction)
+    {
     case MOTOR_DIRECTION_FORWARD:
         motor_forward(255);
         break;
@@ -227,7 +229,8 @@ static void zcl_window_covering_attr_value_handler(const ezb_zcl_attribute_t *at
 {
     ESP_RETURN_ON_FALSE(attribute, , TAG, "attribute is invalid");
 
-    switch (attribute->id) {
+    switch (attribute->id)
+    {
     case EZB_ZCL_ATTR_WINDOW_COVERING_CURRENT_POSITION_TILT_PERCENTAGE_ID:
         s_tilt_percentage = *(uint8_t *)attribute->data.value;
         break;
@@ -239,13 +242,18 @@ static void zcl_window_covering_attr_value_handler(const ezb_zcl_attribute_t *at
         return;
     }
 
-    if (s_tilt_percentage == 0) {
+    if (s_tilt_percentage == 0)
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_STOP);
-    } else if (s_tilt_percentage < 50) {
+    }
+    else if (s_tilt_percentage < 50)
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_BACKWARD);
-    } else {
+    }
+    else
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_FORWARD);
     }
@@ -283,23 +291,30 @@ static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *me
  */
 static void handle_window_covering_movement(ezb_zcl_window_covering_movement_message_t *message)
 {
-    if (!message) {
+    if (!message)
+    {
         return;
     }
 
-    if (message->in.payload.tilt_percentage > 0x64) {
+    if (message->in.payload.tilt_percentage > 0x64)
+    {
         return;
     }
 
     s_tilt_percentage = message->in.payload.tilt_percentage;
 
-    if (s_tilt_percentage == 0) {
+    if (s_tilt_percentage == 0)
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_STOP);
-    } else if (s_tilt_percentage < 50) {
+    }
+    else if (s_tilt_percentage < 50)
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_BACKWARD);
-    } else {
+    }
+    else
+    {
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         apply_motor_direction(MOTOR_DIRECTION_FORWARD);
     }
@@ -366,27 +381,36 @@ static void button_control_task(void *arg)
     bool backward_pressed = false;
     TickType_t last_state_change = xTaskGetTickCount();
 
-    while (1) {
+    while (1)
+    {
         bool new_forward = (gpio_get_level(BUTTON_FORWARD_GPIO) == BUTTON_ACTIVE_LEVEL);
         bool new_backward = (gpio_get_level(BUTTON_BACKWARD_GPIO) == BUTTON_ACTIVE_LEVEL);
         bool button_activity = new_forward || new_backward;
 
         if ((new_forward != forward_pressed || new_backward != backward_pressed) &&
-            (xTaskGetTickCount() - last_state_change) >= pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS)) {
+            (xTaskGetTickCount() - last_state_change) >= pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS))
+        {
             forward_pressed = new_forward;
             backward_pressed = new_backward;
             last_state_change = xTaskGetTickCount();
         }
 
-        if (s_motor_control_source == MOTOR_CONTROL_SOURCE_ZIGBEE && !button_activity) {
+        if (s_motor_control_source == MOTOR_CONTROL_SOURCE_ZIGBEE && !button_activity)
+        {
             apply_motor_direction(s_motor_direction);
-        } else if (forward_pressed && !backward_pressed) {
+        }
+        else if (forward_pressed && !backward_pressed)
+        {
             s_motor_control_source = MOTOR_CONTROL_SOURCE_BUTTONS;
             apply_motor_direction(MOTOR_DIRECTION_FORWARD);
-        } else if (backward_pressed && !forward_pressed) {
+        }
+        else if (backward_pressed && !forward_pressed)
+        {
             s_motor_control_source = MOTOR_CONTROL_SOURCE_BUTTONS;
             apply_motor_direction(MOTOR_DIRECTION_BACKWARD);
-        } else {
+        }
+        else
+        {
             s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
             apply_motor_direction(MOTOR_DIRECTION_STOP);
         }
@@ -640,6 +664,18 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
  */
 void app_main(void)
 {
+    // Force motor driver inputs to a known-safe state ASAP
+    gpio_config_t motor_safe_conf = {
+        .pin_bit_mask = (1ULL << MOTOR_FORWARD_GPIO) | (1ULL << MOTOR_BACKWARD_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&motor_safe_conf);
+    gpio_set_level(MOTOR_FORWARD_GPIO, 0);
+    gpio_set_level(MOTOR_BACKWARD_GPIO, 0);
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
