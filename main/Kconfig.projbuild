@@ -14,4 +14,12 @@ menu "Zigbee Blinds Controller Configuration"
     config MOTOR_BACKWARD_GPIO
         int "GPIO of the motor backward"
         default 5
+
+    config BUTTON_UP_GPIO
+        int "GPIO of the button up"
+        default 10
+
+    config BUTTON_DOWN_GPIO
+        int "GPIO of the button down"
+        default 11
 endmenu

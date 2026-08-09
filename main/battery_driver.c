@@ -129,7 +129,6 @@ int get_battery_milli_volts()
     {
         int adc_raw;
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, channel, &adc_raw));
-        ESP_LOGI("BATTERY", "ADC Raw Value: %d", adc_raw);
         adc_raw_sum += adc_raw;
     }
 

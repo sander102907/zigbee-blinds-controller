@@ -42,10 +42,12 @@ After flashing and pairing the device to a Zigbee coordinator:
 
 - Zigbee2MQTT should discover the device as a cover-like device
 - Sending tilt/position updates from Zigbee2MQTT will drive the motor
-- The firmware currently maps the incoming tilt percentage to motor direction:
-  - 0% = stop
-  - 1–49% = reverse direction
-  - 50–100% = forward direction
+- The device exposes a manufacturer-specific Window Covering attribute to tune the full travel time:
+  - Attribute ID: `0xF010`
+  - Type: `uint32`
+  - Units: milliseconds for 0–100% travel
+  - Example: `4000` means a full 0% → 100% move takes 4 seconds
+- The firmware uses this value when converting a requested percentage delta into a motor run duration.
 
 ## Notes
 

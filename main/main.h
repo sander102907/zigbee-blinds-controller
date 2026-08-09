@@ -17,8 +17,8 @@
 
 #define ESP_BATTERY_ATTR_UPDATE_INTERVAL CONFIG_BATTERY_UPDATE_INTERVAL /* Battery attributes update interval (seconds) */
 
-#define ESP_MANUFACTURER_NAME "\x09""ESPRESSIF"
-#define ESP_MODEL_IDENTIFIER "\x07"CONFIG_IDF_TARGET
+#define ESP_MANUFACTURER_NAME "\x03""SDB"
+#define ESP_MODEL_IDENTIFIER "\x15""Blind_Tilt_Controller"
 
 /* ZED (End Device) configuration */
 #define ESP_ZIGBEE_ZED_CONFIG()                              \
