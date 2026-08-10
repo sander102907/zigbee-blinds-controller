@@ -56,7 +56,8 @@ After flashing and pairing the device to a Zigbee coordinator:
 
 ## Project files
 
-- [main/led_light_controller.c](main/led_light_controller.c) — Zigbee stack setup, endpoint registration, and motor command handling
+- [main/main.c](main/main.c) — Zigbee stack setup, endpoint registration, and motor command handling
+- [main/light_driver.c](main/light_driver.c) — LED output and Zigbee connection status indication
 - [main/motor_driver.c](main/motor_driver.c) — PWM motor driver
 - [main/battery_driver.c](main/battery_driver.c) — ADC battery measurement
-- [main/led_light_controller.h](main/led_light_controller.h) — project constants and configuration
+- [main/main.h](main/main.h) — project constants and configuration

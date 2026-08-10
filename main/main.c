@@ -12,7 +12,6 @@
 #include "driver/gpio.h"
 #include "battery_driver.h"
 #include "alarm_timer.h"
-#include "led_strip.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "motor_driver.c"
@@ -33,13 +32,11 @@ static esp_pm_lock_handle_t pm_lock;
 #include "ezbee/zha.h"
 #include "ezbee/af.h"
 
+#include "light_driver.h"
 #include "main.h"
 
 static const char *TAG = "ZIGBEE_BLINDS_CTRL";
 
-#define LED_GPIO 8
-#define LED_OFF 0
-#define LED_ON 1
 #define BUTTON_FORWARD_GPIO CONFIG_BUTTON_UP_GPIO
 #define BUTTON_BACKWARD_GPIO CONFIG_BUTTON_DOWN_GPIO
 #define BUTTON_ACTIVE_LEVEL 0
@@ -50,8 +47,6 @@ static const char *TAG = "ZIGBEE_BLINDS_CTRL";
 #define CONFIG_NAMESPACE "blind_cfg"
 #define CONFIG_KEY_TRAVEL_MS "travel_ms"
 
-static led_strip_handle_t s_led_strip;
-static volatile bool s_zigbee_connecting = false;
 static uint8_t s_tilt_percentage = 0;
 static uint8_t s_target_tilt_percentage = 0;
 static TickType_t s_zigbee_move_deadline = 0;
@@ -74,91 +69,9 @@ typedef enum
 static motor_direction_t s_motor_direction = MOTOR_DIRECTION_STOP;
 static motor_control_source_t s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
 
-static void zigbee_connection_led_task(void *arg);
-
-/**
- * @brief Initialize the LED GPIO
- */
-static esp_err_t led_init(void)
-{
-    led_strip_config_t led_strip_conf = {
-        .max_leds = 1,
-        .strip_gpio_num = LED_GPIO,
-    };
-    led_strip_rmt_config_t rmt_conf = {
-        .resolution_hz = 10 * 1000 * 1000, // 10MHz
-    };
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&led_strip_conf, &rmt_conf, &s_led_strip));
-
-    xTaskCreate(zigbee_connection_led_task, "zigbee_conn_led", 2048, NULL, 2, NULL);
-    ESP_LOGI(TAG, "LED initialized on GPIO %d", LED_GPIO);
-    return ESP_OK;
-}
-
-static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue)
-{
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, red, green, blue));
-    ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
-}
-
-static void zigbee_connection_led_task(void *arg)
-{
-    (void)arg;
-
-    while (true)
-    {
-        if (s_zigbee_connecting)
-        {
-            led_set_rgb(0, 0, 255);
-            vTaskDelay(pdMS_TO_TICKS(500));
-            led_set_rgb(0, 0, 0);
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-        else
-        {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-    }
-}
-
-/**
- * @brief Set LED state
- * @param state 1 for LED on, 0 for LED off
- */
-static void led_set_state(uint8_t state)
-{
-    bool power = (state != 0);
-
-    led_set_rgb(255 * power, 255 * power, 255 * power);
-    ESP_LOGI(TAG, "LED state set to: %s", state ? "ON" : "OFF");
-}
-
-/**
- * @brief Set LED brightness level
- * @param level 0-254 brightness level
- */
-static void led_set_brightness(uint8_t level)
-{
-    if (level > 0)
-    {
-        gpio_set_level(LED_GPIO, LED_ON);
-    }
-    else
-    {
-        gpio_set_level(LED_GPIO, LED_OFF);
-    }
-    ESP_LOGI(TAG, "LED brightness set to: %d", level);
-}
-
-/**
- * @brief Set LED color (stored but not visually changed on GPIO LED)
- * @param color_x CIE color x coordinate
- * @param color_y CIE color y coordinate
- */
-static void led_set_color(uint16_t color_x, uint16_t color_y)
-{
-    ESP_LOGI(TAG, "LED color set to: x=0x%04x, y=0x%04x", color_x, color_y);
-}
+#ifdef CONFIG_PM_ENABLE
+static bool s_motion_pm_lock_held;
+#endif
 
 /**
  * @brief Handle on/off cluster attribute changes
@@ -169,7 +82,7 @@ static void zcl_on_off_attr_value_handler(const ezb_zcl_attribute_t *attribute)
     switch (attribute->id)
     {
     case EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID:
-        led_set_state(*(uint8_t *)attribute->data.value);
+        light_driver_set_state(*(uint8_t *)attribute->data.value);
         ESP_LOGI(TAG, "Set On/Off: %d", *(uint8_t *)attribute->data.value);
         break;
     default:
@@ -187,7 +100,7 @@ static void zcl_level_attr_value_handler(const ezb_zcl_attribute_t *attribute)
     switch (attribute->id)
     {
     case EZB_ZCL_ATTR_LEVEL_CURRENT_LEVEL_ID:
-        led_set_brightness(*(uint8_t *)attribute->data.value);
+        light_driver_set_brightness(*(uint8_t *)attribute->data.value);
         break;
     default:
         ESP_LOGW(TAG, "Unsupported level attribute ID(0x%04x)", attribute->id);
@@ -221,7 +134,7 @@ static void zcl_color_attr_value_handler(const ezb_zcl_attribute_t *attribute)
     }
     if (new_color_x != cur_color_x || new_color_y != cur_color_y)
     {
-        led_set_color(new_color_x, new_color_y);
+        light_driver_set_color(new_color_x, new_color_y);
         cur_color_x = new_color_x;
         cur_color_y = new_color_y;
         ESP_LOGI(TAG, "Set Color: x=0x%04x, y=0x%04x", cur_color_x, cur_color_y);
@@ -233,6 +146,19 @@ static void zcl_color_attr_value_handler(const ezb_zcl_attribute_t *attribute)
  */
 static void apply_motor_direction(motor_direction_t direction)
 {
+#ifdef CONFIG_PM_ENABLE
+    if (direction == MOTOR_DIRECTION_STOP && s_motion_pm_lock_held)
+    {
+        ESP_ERROR_CHECK(esp_pm_lock_release(pm_lock));
+        s_motion_pm_lock_held = false;
+    }
+    else if (direction != MOTOR_DIRECTION_STOP && !s_motion_pm_lock_held)
+    {
+        ESP_ERROR_CHECK(esp_pm_lock_acquire(pm_lock));
+        s_motion_pm_lock_held = true;
+    }
+#endif
+
     switch (direction)
     {
     case MOTOR_DIRECTION_FORWARD:
@@ -542,6 +468,9 @@ static void buttons_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
+    ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_FORWARD_GPIO, GPIO_INTR_LOW_LEVEL));
+    ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_BACKWARD_GPIO, GPIO_INTR_LOW_LEVEL));
     ESP_LOGI(TAG, "Button inputs initialized on GPIO %d and %d", BUTTON_FORWARD_GPIO, BUTTON_BACKWARD_GPIO);
 }
 
@@ -679,7 +608,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
     {
     case EZB_ZDO_SIGNAL_SKIP_STARTUP:
         ESP_LOGI(TAG, "Initialize Zigbee stack");
-        s_zigbee_connecting = true;
+        light_driver_set_zigbee_connecting(true);
         ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
         break;
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
@@ -692,12 +621,12 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new())
             {
-                s_zigbee_connecting = true;
+                light_driver_set_zigbee_connecting(true);
                 ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
             }
             else
             {
-                s_zigbee_connecting = false;
+                light_driver_set_zigbee_connecting(false);
                 ESP_LOGI(TAG, "Device reboot");
             }
         }
@@ -713,7 +642,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
         if (status == EZB_BDB_STATUS_SUCCESS)
         {
-            s_zigbee_connecting = false;
+            light_driver_set_zigbee_connecting(false);
             ezb_extpanid_t extended_pan_id;
             ezb_nwk_get_extended_panid(&extended_pan_id);
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
@@ -857,7 +786,7 @@ static esp_err_t esp_pm_light_sleep_config(void)
     esp_pm_config_t pm_config = {
         .max_freq_mhz = cur_cpu_freq_mhz,
         .min_freq_mhz = cur_cpu_freq_mhz,
-        .light_sleep_enable = false,
+        .light_sleep_enable = true,
     };
     rc = esp_pm_configure(&pm_config);
 #endif /* CONFIG_FREERTOS_USE_TICKLESS_IDLE */
@@ -918,7 +847,7 @@ void app_main(void)
     ESP_ERROR_CHECK(load_config_state());
 
     /* Initialize LED */
-    ESP_ERROR_CHECK(led_init());
+    ESP_ERROR_CHECK(light_driver_init());
 
 #ifdef CONFIG_PM_ENABLE
     ESP_ERROR_CHECK(esp_pm_light_sleep_config());
