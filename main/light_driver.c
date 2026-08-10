@@ -13,6 +13,7 @@
 static const char *TAG = "LIGHT_DRIVER";
 static led_strip_handle_t s_led_strip;
 static volatile bool s_zigbee_connecting;
+static TaskHandle_t s_connection_led_task;
 
 static void light_driver_set_rgb(uint8_t red, uint8_t green, uint8_t blue)
 {
@@ -35,7 +36,7 @@ static void zigbee_connection_led_task(void *arg)
         }
         else
         {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
     }
 }
@@ -51,7 +52,8 @@ esp_err_t light_driver_init(void)
     };
 
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&led_strip_conf, &rmt_conf, &s_led_strip));
-    xTaskCreate(zigbee_connection_led_task, "zigbee_conn_led", 2048, NULL, 2, NULL);
+    ESP_ERROR_CHECK(xTaskCreate(zigbee_connection_led_task, "zigbee_conn_led", 2048, NULL, 2,
+                                &s_connection_led_task) == pdPASS ? ESP_OK : ESP_FAIL);
     ESP_LOGI(TAG, "LED initialized on GPIO %d", LED_GPIO);
     return ESP_OK;
 }
@@ -78,4 +80,8 @@ void light_driver_set_color(uint16_t color_x, uint16_t color_y)
 void light_driver_set_zigbee_connecting(bool connecting)
 {
     s_zigbee_connecting = connecting;
+    if (s_connection_led_task != NULL)
+    {
+        xTaskNotifyGive(s_connection_led_task);
+    }
 }

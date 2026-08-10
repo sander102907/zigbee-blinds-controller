@@ -448,6 +448,14 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 
 static void battery_update_handler(uint8_t battery_percentage)
 {
+    static uint8_t last_battery_percentage = UINT8_MAX;
+
+    if (battery_percentage == last_battery_percentage)
+    {
+        return;
+    }
+
+    last_battery_percentage = battery_percentage;
     ESP_LOGI(TAG, "Battery update: percentage=%d%%", battery_percentage / 2);
     /* Update battery attributes */
     esp_zigbee_lock_acquire(portMAX_DELAY);

@@ -139,8 +139,8 @@ module.exports = {
     );
     await configure(() => endpoint.configureReporting('genPowerCfg', [{
       attribute: 'batteryPercentageRemaining',
-      minimumReportInterval: 5,
-      maximumReportInterval: 300,
+      minimumReportInterval: 60,
+      maximumReportInterval: 3600,
       reportableChange: 1,
     }]), 'battery reporting');
     await configure(() => endpoint.configureReporting('closuresWindowCovering', [{
