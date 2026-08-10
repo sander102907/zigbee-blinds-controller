@@ -68,7 +68,6 @@ typedef enum
 
 static motor_direction_t s_motor_direction = MOTOR_DIRECTION_STOP;
 static motor_control_source_t s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
-
 #ifdef CONFIG_PM_ENABLE
 static bool s_motion_pm_lock_held;
 #endif
@@ -576,7 +575,14 @@ static void button_control_task(void *arg)
             apply_motor_direction(MOTOR_DIRECTION_STOP);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        if (!button_activity && s_motor_control_source == MOTOR_CONTROL_SOURCE_NONE)
+        {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        else
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
 }
 
@@ -593,7 +599,11 @@ static esp_err_t deferred_driver_init(void)
 
     motor_init();
     buttons_init();
-    xTaskCreate(button_control_task, "button_control", 4096, NULL, 5, NULL);
+    if (xTaskCreate(button_control_task, "button_control", 4096, NULL, 5, NULL) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create button control task");
+        return ESP_FAIL;
+    }
 
     return is_inited ? ESP_OK : ESP_FAIL;
 }
@@ -785,7 +795,7 @@ esp_pm_sleep_cbs_register_config_t s_sleep_cbs_config = {
 static esp_err_t esp_pm_light_sleep_config(void)
 {
     esp_err_t rc = ESP_OK;
-    // Do not allow the system to power down peripherals/USB during light sleep
+    // Keep clocks required by the Zigbee/light-sleep stack powered.
     esp_sleep_pd_config(ESP_PD_DOMAIN_XTAL, ESP_PD_OPTION_ON);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RC_FAST, ESP_PD_OPTION_ON);
 
