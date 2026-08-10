@@ -23,6 +23,10 @@ static esp_pm_lock_handle_t pm_lock;
 
 #endif
 
+#if SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
+#include "driver/rtc_io.h"
+#endif
+
 #if CONFIG_ESP_SLEEP_DEBUG
 #include "esp_private/esp_pmu.h"
 #include "esp_private/esp_sleep_internal.h"
@@ -68,6 +72,7 @@ typedef enum
 
 static motor_direction_t s_motor_direction = MOTOR_DIRECTION_STOP;
 static motor_control_source_t s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
+static TaskHandle_t s_button_task_handle;
 #ifdef CONFIG_PM_ENABLE
 static bool s_motion_pm_lock_held;
 #endif
@@ -301,6 +306,10 @@ static void start_zigbee_move_to_percentage(uint8_t target_percentage)
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         s_target_tilt_percentage = clamped_target;
         s_zigbee_move_deadline = xTaskGetTickCount();
+        if (s_button_task_handle != NULL)
+        {
+            xTaskNotifyGive(s_button_task_handle);
+        }
         apply_motor_direction(MOTOR_DIRECTION_STOP);
         return;
     }
@@ -311,6 +320,10 @@ static void start_zigbee_move_to_percentage(uint8_t target_percentage)
     s_target_tilt_percentage = clamped_target;
     s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
     s_zigbee_move_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(run_ms);
+    if (s_button_task_handle != NULL)
+    {
+        xTaskNotifyGive(s_button_task_handle);
+    }
     apply_motor_direction(direction);
 
     ESP_LOGI(TAG, "Moving tilt from %u%% to %u%% for %lu ms (%s) using full-travel %lu ms",
@@ -471,14 +484,43 @@ static void buttons_init(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_LOW_LEVEL,
     };
 
     ESP_ERROR_CHECK(gpio_config(&io_conf));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
     ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_FORWARD_GPIO, GPIO_INTR_LOW_LEVEL));
     ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_BACKWARD_GPIO, GPIO_INTR_LOW_LEVEL));
+    ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(
+        (1ULL << BUTTON_FORWARD_GPIO) | (1ULL << BUTTON_BACKWARD_GPIO),
+        ESP_EXT1_WAKEUP_ANY_LOW));
+
+#if SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
+    rtc_gpio_pulldown_dis(BUTTON_FORWARD_GPIO);
+    rtc_gpio_pullup_en(BUTTON_FORWARD_GPIO);
+    rtc_gpio_pulldown_dis(BUTTON_BACKWARD_GPIO);
+    rtc_gpio_pullup_en(BUTTON_BACKWARD_GPIO);
+#else
+    gpio_pulldown_dis(BUTTON_FORWARD_GPIO);
+    gpio_pullup_en(BUTTON_FORWARD_GPIO);
+    gpio_pulldown_dis(BUTTON_BACKWARD_GPIO);
+    gpio_pullup_en(BUTTON_BACKWARD_GPIO);
+#endif
     ESP_LOGI(TAG, "Button inputs initialized on GPIO %d and %d", BUTTON_FORWARD_GPIO, BUTTON_BACKWARD_GPIO);
+}
+
+static void IRAM_ATTR button_gpio_isr(void *arg)
+{
+    gpio_num_t gpio_num = (gpio_num_t)(uintptr_t)arg;
+    gpio_intr_disable(gpio_num);
+
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (s_button_task_handle != NULL)
+    {
+        vTaskNotifyGiveFromISR(s_button_task_handle, &higher_priority_task_woken);
+    }
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 static void update_button_tilt(motor_direction_t direction, TickType_t start_tick, uint8_t start_tilt)
@@ -498,10 +540,7 @@ static void update_button_tilt(motor_direction_t direction, TickType_t start_tic
     }
 
     uint8_t target_tilt = clamp_tilt_percentage(target);
-    if (target_tilt != s_tilt_percentage)
-    {
-        publish_tilt_percentage(target_tilt);
-    }
+    s_tilt_percentage = target_tilt;
 }
 
 static void button_control_task(void *arg)
@@ -510,6 +549,8 @@ static void button_control_task(void *arg)
 
     bool forward_pressed = false;
     bool backward_pressed = false;
+    bool candidate_forward = false;
+    bool candidate_backward = false;
     TickType_t button_move_start = 0;
     uint8_t button_move_start_tilt = 0;
     TickType_t last_state_change = xTaskGetTickCount();
@@ -518,17 +559,28 @@ static void button_control_task(void *arg)
     {
         bool new_forward = (gpio_get_level(BUTTON_FORWARD_GPIO) == BUTTON_ACTIVE_LEVEL);
         bool new_backward = (gpio_get_level(BUTTON_BACKWARD_GPIO) == BUTTON_ACTIVE_LEVEL);
-        bool button_activity = new_forward || new_backward;
+        bool raw_button_activity = new_forward || new_backward;
 
-        if ((new_forward != forward_pressed || new_backward != backward_pressed) &&
-            (xTaskGetTickCount() - last_state_change) >= pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS))
+        TickType_t now = xTaskGetTickCount();
+        if (new_forward != candidate_forward || new_backward != candidate_backward)
         {
-            forward_pressed = new_forward;
-            backward_pressed = new_backward;
-            last_state_change = xTaskGetTickCount();
+            candidate_forward = new_forward;
+            candidate_backward = new_backward;
+            last_state_change = now;
         }
 
-        if (s_motor_control_source == MOTOR_CONTROL_SOURCE_ZIGBEE && !button_activity)
+        if ((candidate_forward != forward_pressed || candidate_backward != backward_pressed) &&
+            (now - last_state_change) >= pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS))
+        {
+            forward_pressed = candidate_forward;
+            backward_pressed = candidate_backward;
+        }
+
+        bool button_activity = forward_pressed || backward_pressed;
+        bool button_state_pending = raw_button_activity != button_activity;
+
+        if (s_motor_control_source == MOTOR_CONTROL_SOURCE_ZIGBEE &&
+            !button_activity && !raw_button_activity)
         {
             if (s_zigbee_move_deadline != 0 && xTaskGetTickCount() >= s_zigbee_move_deadline)
             {
@@ -570,14 +622,26 @@ static void button_control_task(void *arg)
         }
         else
         {
-            s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
-            s_zigbee_move_deadline = 0;
+            if (s_motor_control_source == MOTOR_CONTROL_SOURCE_BUTTONS &&
+                !button_activity && !button_state_pending)
+            {
+                publish_tilt_percentage(s_tilt_percentage);
+                s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
+                s_zigbee_move_deadline = 0;
+            }
             apply_motor_direction(MOTOR_DIRECTION_STOP);
         }
 
-        if (!button_activity && s_motor_control_source == MOTOR_CONTROL_SOURCE_NONE)
+        if (!raw_button_activity)
         {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            gpio_intr_enable(BUTTON_FORWARD_GPIO);
+            gpio_intr_enable(BUTTON_BACKWARD_GPIO);
+        }
+
+        if (!button_activity && !button_state_pending &&
+            s_motor_control_source == MOTOR_CONTROL_SOURCE_NONE)
+        {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
         else
         {
@@ -599,11 +663,15 @@ static esp_err_t deferred_driver_init(void)
 
     motor_init();
     buttons_init();
-    if (xTaskCreate(button_control_task, "button_control", 4096, NULL, 5, NULL) != pdPASS)
+    if (xTaskCreate(button_control_task, "button_control", 4096, NULL, 5, &s_button_task_handle) != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create button control task");
         return ESP_FAIL;
     }
+    ESP_ERROR_CHECK(gpio_isr_handler_add(BUTTON_FORWARD_GPIO, button_gpio_isr,
+                                         (void *)(uintptr_t)BUTTON_FORWARD_GPIO));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(BUTTON_BACKWARD_GPIO, button_gpio_isr,
+                                         (void *)(uintptr_t)BUTTON_BACKWARD_GPIO));
 
     return is_inited ? ESP_OK : ESP_FAIL;
 }
