@@ -134,7 +134,7 @@ module.exports = {
     };
 
     await configure(
-      () => reporting.bind(endpoint, coordinatorEndpoint, ['closuresWindowCovering']),
+      () => reporting.bind(endpoint, coordinatorEndpoint, ['closuresWindowCovering', 'genPowerCfg']),
       'Window Covering binding',
     );
     await configure(() => endpoint.configureReporting('genPowerCfg', [{
@@ -145,7 +145,7 @@ module.exports = {
     }]), 'battery reporting');
     await configure(() => endpoint.configureReporting('closuresWindowCovering', [{
       attribute: 'currentPositionTiltPercentage',
-      minimumReportInterval: 1,
+      minimumReportInterval: 0,
       maximumReportInterval: 300,
       reportableChange: 1,
     }]), 'tilt reporting');

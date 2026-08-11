@@ -7,6 +7,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -44,12 +45,13 @@ static const char *TAG = "ZIGBEE_BLINDS_CTRL";
 #define BUTTON_FORWARD_GPIO CONFIG_BUTTON_UP_GPIO
 #define BUTTON_BACKWARD_GPIO CONFIG_BUTTON_DOWN_GPIO
 #define BUTTON_ACTIVE_LEVEL 0
-#define BUTTON_DEBOUNCE_MS 20
+#define BUTTON_DEBOUNCE_MS 100
 #define MOTOR_FULL_TRAVEL_MS 4000U
 #define WINDOW_COVERING_TRAVEL_TIME_ATTR_ID 0xF010U
 #define WINDOW_COVERING_TRAVEL_TIME_MANUF_CODE EZB_ZCL_ESP_MANUF_CODE
 #define CONFIG_NAMESPACE "blind_cfg"
 #define CONFIG_KEY_TRAVEL_MS "travel_ms"
+#define CONFIG_KEY_TILT_PERCENTAGE "tilt_percentage"
 
 static uint8_t s_tilt_percentage = 0;
 static uint8_t s_target_tilt_percentage = 0;
@@ -214,6 +216,12 @@ static esp_err_t load_config_state(void)
         s_full_travel_ms = travel_ms;
     }
 
+    uint8_t tilt_percentage = 0;
+    if (nvs_get_u8(handle, CONFIG_KEY_TILT_PERCENTAGE, &tilt_percentage) == ESP_OK)
+    {
+        s_tilt_percentage = clamp_tilt_percentage(tilt_percentage);
+    }
+
     if (s_full_travel_ms == 0)
     {
         s_full_travel_ms = MOTOR_FULL_TRAVEL_MS;
@@ -233,6 +241,10 @@ static esp_err_t save_config_state(void)
     }
 
     err = nvs_set_u32(handle, CONFIG_KEY_TRAVEL_MS, s_full_travel_ms);
+    if (err == ESP_OK)
+    {
+        err = nvs_set_u8(handle, CONFIG_KEY_TILT_PERCENTAGE, s_tilt_percentage);
+    }
     if (err == ESP_OK)
     {
         err = nvs_commit(handle);
@@ -256,7 +268,21 @@ static uint32_t compute_percent_delta_time_ms(uint8_t target_percentage)
 static void publish_tilt_percentage(uint8_t tilt_percentage)
 {
     ezb_zcl_status_t status;
+    ezb_err_t report_status = EZB_ERR_NONE;
     uint8_t reported_tilt_percentage = 100U - tilt_percentage;
+    ezb_zcl_report_attr_cmd_t report_attr_cmd = {
+        .cmd_ctrl =
+            {
+                .fc.direction = EZB_ZCL_CMD_DIRECTION_TO_CLI,
+                .dst_addr.addr_mode = EZB_ADDR_MODE_NONE,
+                .src_ep = ESP_ZIGBEE_HA_COLOR_DIMMABLE_LIGHT_EP_ID,
+                .cluster_id = EZB_ZCL_CLUSTER_ID_WINDOW_COVERING,
+            },
+        .payload =
+            {
+                .attr_id = EZB_ZCL_ATTR_WINDOW_COVERING_CURRENT_POSITION_TILT_PERCENTAGE_ID,
+            },
+    };
 
     s_tilt_percentage = tilt_percentage;
     esp_zigbee_lock_acquire(portMAX_DELAY);
@@ -267,6 +293,10 @@ static void publish_tilt_percentage(uint8_t tilt_percentage)
                                     EZB_ZCL_STD_MANUF_CODE,
                                     &reported_tilt_percentage,
                                     false);
+    if (status == EZB_ZCL_STATUS_SUCCESS)
+    {
+        report_status = ezb_zcl_report_attr_cmd_req(&report_attr_cmd);
+    }
     esp_zigbee_lock_release();
 
     if (status != EZB_ZCL_STATUS_SUCCESS)
@@ -277,6 +307,14 @@ static void publish_tilt_percentage(uint8_t tilt_percentage)
     {
         ESP_LOGI(TAG, "Tilt percentage updated to %u%% (reported %u%%)",
              s_tilt_percentage, reported_tilt_percentage);
+        if (save_config_state() != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Failed to persist tilt percentage to NVS");
+        }
+        if (report_status != EZB_ERR_NONE)
+        {
+            ESP_LOGW(TAG, "Failed to send tilt percentage report: error(0x%04x)", report_status);
+        }
     }
 }
 
@@ -461,20 +499,55 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 static void battery_update_handler(uint8_t battery_percentage)
 {
     static uint8_t last_battery_percentage = UINT8_MAX;
+    ezb_zcl_status_t status;
+    ezb_err_t report_status = EZB_ERR_NONE;
+    ezb_zcl_report_attr_cmd_t report_attr_cmd = {
+        .cmd_ctrl =
+            {
+                .fc.direction = EZB_ZCL_CMD_DIRECTION_TO_CLI,
+                .dst_addr.addr_mode = EZB_ADDR_MODE_NONE,
+                .src_ep = ESP_ZIGBEE_HA_COLOR_DIMMABLE_LIGHT_EP_ID,
+                .cluster_id = EZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+            },
+        .payload =
+            {
+                .attr_id = EZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+            },
+    };
 
     if (battery_percentage == last_battery_percentage)
     {
         return;
     }
 
-    last_battery_percentage = battery_percentage;
     ESP_LOGI(TAG, "Battery update: percentage=%d%%", battery_percentage / 2);
-    /* Update battery attributes */
     esp_zigbee_lock_acquire(portMAX_DELAY);
-    ezb_zcl_set_attr_value(ESP_ZIGBEE_HA_COLOR_DIMMABLE_LIGHT_EP_ID, EZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                           EZB_ZCL_CLUSTER_SERVER, EZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-                           EZB_ZCL_STD_MANUF_CODE, (uint8_t *)&battery_percentage, false);
+    status = ezb_zcl_set_attr_value(
+        ESP_ZIGBEE_HA_COLOR_DIMMABLE_LIGHT_EP_ID,
+        EZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        EZB_ZCL_CLUSTER_SERVER,
+        EZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+        EZB_ZCL_STD_MANUF_CODE,
+        (uint8_t *)&battery_percentage,
+        false);
+    if (status == EZB_ZCL_STATUS_SUCCESS)
+    {
+        report_status = ezb_zcl_report_attr_cmd_req(&report_attr_cmd);
+    }
     esp_zigbee_lock_release();
+
+    if (status != EZB_ZCL_STATUS_SUCCESS)
+    {
+        ESP_LOGW(TAG, "Failed to update battery attribute: status(0x%02x)", status);
+    }
+    else if (report_status != EZB_ERR_NONE)
+    {
+        ESP_LOGW(TAG, "Failed to send battery report: error(0x%04x)", report_status);
+    }
+    else
+    {
+        last_battery_percentage = battery_percentage;
+    }
 }
 
 static void buttons_init(void)
@@ -523,11 +596,16 @@ static void IRAM_ATTR button_gpio_isr(void *arg)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-static void update_button_tilt(motor_direction_t direction, TickType_t start_tick, uint8_t start_tilt)
+static void update_button_tilt(motor_direction_t direction, int64_t start_time_us, uint8_t start_tilt)
 {
-    TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
-    uint32_t elapsed_ms = (uint32_t)(((uint64_t)elapsed_ticks * 1000U) / configTICK_RATE_HZ);
-    uint32_t delta = (elapsed_ms * 100U) / s_full_travel_ms;
+    int64_t elapsed_time_us = esp_timer_get_time() - start_time_us;
+    if (elapsed_time_us < 0)
+    {
+        elapsed_time_us = 0;
+    }
+
+    uint32_t delta = (uint32_t)(((uint64_t)elapsed_time_us * 100U) /
+                                ((uint64_t)s_full_travel_ms * 1000U));
     int32_t target = start_tilt;
 
     if (direction == MOTOR_DIRECTION_FORWARD)
@@ -551,8 +629,9 @@ static void button_control_task(void *arg)
     bool backward_pressed = false;
     bool candidate_forward = false;
     bool candidate_backward = false;
-    TickType_t button_move_start = 0;
+    int64_t button_move_start_us = 0;
     uint8_t button_move_start_tilt = 0;
+    motor_direction_t button_move_direction = MOTOR_DIRECTION_STOP;
     TickType_t last_state_change = xTaskGetTickCount();
 
     while (1)
@@ -599,12 +678,13 @@ static void button_control_task(void *arg)
             if (s_motor_control_source != MOTOR_CONTROL_SOURCE_BUTTONS ||
                 s_motor_direction != MOTOR_DIRECTION_FORWARD)
             {
-                button_move_start = xTaskGetTickCount();
+                button_move_start_us = esp_timer_get_time();
                 button_move_start_tilt = s_tilt_percentage;
+                button_move_direction = MOTOR_DIRECTION_FORWARD;
             }
             s_motor_control_source = MOTOR_CONTROL_SOURCE_BUTTONS;
             s_zigbee_move_deadline = 0;
-            update_button_tilt(MOTOR_DIRECTION_FORWARD, button_move_start, button_move_start_tilt);
+            update_button_tilt(MOTOR_DIRECTION_FORWARD, button_move_start_us, button_move_start_tilt);
             apply_motor_direction(MOTOR_DIRECTION_FORWARD);
         }
         else if (backward_pressed && !forward_pressed)
@@ -612,12 +692,13 @@ static void button_control_task(void *arg)
             if (s_motor_control_source != MOTOR_CONTROL_SOURCE_BUTTONS ||
                 s_motor_direction != MOTOR_DIRECTION_BACKWARD)
             {
-                button_move_start = xTaskGetTickCount();
+                button_move_start_us = esp_timer_get_time();
                 button_move_start_tilt = s_tilt_percentage;
+                button_move_direction = MOTOR_DIRECTION_BACKWARD;
             }
             s_motor_control_source = MOTOR_CONTROL_SOURCE_BUTTONS;
             s_zigbee_move_deadline = 0;
-            update_button_tilt(MOTOR_DIRECTION_BACKWARD, button_move_start, button_move_start_tilt);
+            update_button_tilt(MOTOR_DIRECTION_BACKWARD, button_move_start_us, button_move_start_tilt);
             apply_motor_direction(MOTOR_DIRECTION_BACKWARD);
         }
         else
@@ -625,6 +706,7 @@ static void button_control_task(void *arg)
             if (s_motor_control_source == MOTOR_CONTROL_SOURCE_BUTTONS &&
                 !button_activity && !button_state_pending)
             {
+                update_button_tilt(button_move_direction, button_move_start_us, button_move_start_tilt);
                 publish_tilt_percentage(s_tilt_percentage);
                 s_motor_control_source = MOTOR_CONTROL_SOURCE_NONE;
                 s_zigbee_move_deadline = 0;

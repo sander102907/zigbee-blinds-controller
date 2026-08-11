@@ -173,6 +173,9 @@ void update_battery_attributes()
         int battery_mv = get_battery_milli_volts();                        // Get battery voltage in mV
         int battery_percentage = calculate_battery_percentage(battery_mv); // Get battery % (0-100)
 
+        ESP_LOGI("BATTERY", "Measured battery voltage: %d mV, percentage: %d%%",
+             battery_mv, battery_percentage);
+
         // Convert values to Zigbee format
         uint8_t zigbee_battery_percentage = (battery_percentage * 2); // Zigbee uses 0-200 range
 
