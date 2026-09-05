@@ -48,15 +48,18 @@ static const char *TAG = "ZIGBEE_BLINDS_CTRL";
 #define BUTTON_DEBOUNCE_MS 100
 #define MOTOR_FULL_TRAVEL_MS 4000U
 #define WINDOW_COVERING_TRAVEL_TIME_ATTR_ID 0xF010U
+#define WINDOW_COVERING_ENDPOINT_CALIBRATION_ATTR_ID 0xF011U
 #define WINDOW_COVERING_TRAVEL_TIME_MANUF_CODE EZB_ZCL_ESP_MANUF_CODE
 #define CONFIG_NAMESPACE "blind_cfg"
 #define CONFIG_KEY_TRAVEL_MS "travel_ms"
+#define CONFIG_KEY_ENDPOINT_CALIBRATION_MS "endpoint_calibration_ms"
 #define CONFIG_KEY_TILT_PERCENTAGE "tilt_percentage"
 
 static uint8_t s_tilt_percentage = 0;
 static uint8_t s_target_tilt_percentage = 0;
 static TickType_t s_zigbee_move_deadline = 0;
 static uint32_t s_full_travel_ms = MOTOR_FULL_TRAVEL_MS;
+static uint32_t s_endpoint_calibration_ms = 0;
 
 typedef enum
 {
@@ -216,6 +219,8 @@ static esp_err_t load_config_state(void)
         s_full_travel_ms = travel_ms;
     }
 
+    nvs_get_u32(handle, CONFIG_KEY_ENDPOINT_CALIBRATION_MS, &s_endpoint_calibration_ms);
+
     uint8_t tilt_percentage = 0;
     if (nvs_get_u8(handle, CONFIG_KEY_TILT_PERCENTAGE, &tilt_percentage) == ESP_OK)
     {
@@ -241,6 +246,10 @@ static esp_err_t save_config_state(void)
     }
 
     err = nvs_set_u32(handle, CONFIG_KEY_TRAVEL_MS, s_full_travel_ms);
+    if (err == ESP_OK)
+    {
+        err = nvs_set_u32(handle, CONFIG_KEY_ENDPOINT_CALIBRATION_MS, s_endpoint_calibration_ms);
+    }
     if (err == ESP_OK)
     {
         err = nvs_set_u8(handle, CONFIG_KEY_TILT_PERCENTAGE, s_tilt_percentage);
@@ -334,6 +343,18 @@ static void apply_travel_time_config(uint32_t travel_ms)
     }
 }
 
+static void apply_endpoint_calibration_config(uint32_t calibration_ms)
+{
+    s_endpoint_calibration_ms = calibration_ms;
+    ESP_LOGI(TAG, "Updated endpoint calibration time to %lu ms",
+             (unsigned long)s_endpoint_calibration_ms);
+
+    if (save_config_state() != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Failed to persist endpoint calibration time to NVS");
+    }
+}
+
 static void start_zigbee_move_to_percentage(uint8_t target_percentage)
 {
     uint8_t clamped_target = clamp_tilt_percentage((int32_t)target_percentage);
@@ -341,6 +362,23 @@ static void start_zigbee_move_to_percentage(uint8_t target_percentage)
 
     if (delta == 0)
     {
+        if ((clamped_target == 0 || clamped_target == 100) && s_endpoint_calibration_ms > 0)
+        {
+            motor_direction_t endpoint_direction = (clamped_target == 100) ?
+                MOTOR_DIRECTION_FORWARD : MOTOR_DIRECTION_BACKWARD;
+            s_target_tilt_percentage = clamped_target;
+            s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
+            s_zigbee_move_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(s_endpoint_calibration_ms);
+            if (s_button_task_handle != NULL)
+            {
+                xTaskNotifyGive(s_button_task_handle);
+            }
+            apply_motor_direction(endpoint_direction);
+            ESP_LOGI(TAG, "Calibrating tilt endpoint %u%% for %lu ms",
+                     clamped_target, (unsigned long)s_endpoint_calibration_ms);
+            return;
+        }
+
         s_motor_control_source = MOTOR_CONTROL_SOURCE_ZIGBEE;
         s_target_tilt_percentage = clamped_target;
         s_zigbee_move_deadline = xTaskGetTickCount();
@@ -353,6 +391,11 @@ static void start_zigbee_move_to_percentage(uint8_t target_percentage)
     }
 
     uint32_t run_ms = compute_percent_delta_time_ms(clamped_target);
+    if ((clamped_target == 0 || clamped_target == 100) &&
+        s_endpoint_calibration_ms <= UINT32_MAX - run_ms)
+    {
+        run_ms += s_endpoint_calibration_ms;
+    }
     motor_direction_t direction = (delta > 0) ? MOTOR_DIRECTION_FORWARD : MOTOR_DIRECTION_BACKWARD;
 
     s_target_tilt_percentage = clamped_target;
@@ -364,10 +407,11 @@ static void start_zigbee_move_to_percentage(uint8_t target_percentage)
     }
     apply_motor_direction(direction);
 
-    ESP_LOGI(TAG, "Moving tilt from %u%% to %u%% for %lu ms (%s) using full-travel %lu ms",
+    ESP_LOGI(TAG, "Moving tilt from %u%% to %u%% for %lu ms (%s) using full-travel %lu ms and endpoint calibration %lu ms",
              s_tilt_percentage, clamped_target, (unsigned long)run_ms,
              direction == MOTOR_DIRECTION_FORWARD ? "forward" : "backward",
-             (unsigned long)s_full_travel_ms);
+             (unsigned long)s_full_travel_ms,
+             (unsigned long)s_endpoint_calibration_ms);
 }
 
 static void zcl_window_covering_attr_value_handler(const ezb_zcl_attribute_t *attribute)
@@ -415,6 +459,14 @@ static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *me
         {
             uint32_t new_travel_ms = *(uint32_t *)message->in.attribute.data.value;
             apply_travel_time_config(new_travel_ms);
+            break;
+        }
+        if (message->in.attribute.id == WINDOW_COVERING_ENDPOINT_CALIBRATION_ATTR_ID &&
+            message->in.attribute.data.type == EZB_ZCL_ATTR_TYPE_UINT32 &&
+            message->in.attribute.data.size == sizeof(uint32_t))
+        {
+            uint32_t new_calibration_ms = *(uint32_t *)message->in.attribute.data.value;
+            apply_endpoint_calibration_config(new_calibration_ms);
             break;
         }
         zcl_window_covering_attr_value_handler(&message->in.attribute);
@@ -885,6 +937,11 @@ static esp_err_t esp_zigbee_create_light_device(void)
                                        EZB_ZCL_ATTR_ACCESS_READ | EZB_ZCL_ATTR_ACCESS_WRITE,
                                        WINDOW_COVERING_TRAVEL_TIME_MANUF_CODE,
                                        &s_full_travel_ms);
+    ezb_zcl_cluster_desc_add_manuf_attr(window_desc, WINDOW_COVERING_ENDPOINT_CALIBRATION_ATTR_ID,
+                                       EZB_ZCL_ATTR_TYPE_UINT32,
+                                       EZB_ZCL_ATTR_ACCESS_READ | EZB_ZCL_ATTR_ACCESS_WRITE,
+                                       WINDOW_COVERING_TRAVEL_TIME_MANUF_CODE,
+                                       &s_endpoint_calibration_ms);
 
     ezb_af_node_power_desc_t node_power_desc = {
         .current_power_mode = EZB_AF_NODE_POWER_MODE_COME_ON_PERIODICALLY,

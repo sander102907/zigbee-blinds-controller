@@ -48,6 +48,11 @@ After flashing and pairing the device to a Zigbee coordinator:
   - Units: milliseconds for 0–100% travel
   - Example: `4000` means a full 0% → 100% move takes 4 seconds
 - The firmware uses this value when converting a requested percentage delta into a motor run duration.
+- The device also exposes endpoint calibration time:
+   - Attribute ID: `0xF011`
+   - Type: `uint32`
+   - Units: additional milliseconds for 0% or 100% Zigbee endpoint commands
+   - Example: `500` adds 500 ms when an endpoint command is received; `0` disables the addition
 
 ## Notes
 

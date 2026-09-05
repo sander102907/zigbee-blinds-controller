@@ -35,6 +35,10 @@ Example values:
 
 After the converter loads, the device should expose a numeric setting named `travel_time_ms` that can be set from Zigbee2MQTT or Home Assistant.
 
+It also exposes `endpoint_calibration_ms`, which adds a configurable amount of motor run time whenever a Zigbee command targets 0% or 100%. Set it to `0` to disable endpoint calibration time.
+
 The firmware uses the value to calculate the required motor run time:
 
 `move_time = abs(target - current) / 100 * travel_time_ms`
+
+For endpoint targets, `endpoint_calibration_ms` is added to the calculated move time.
